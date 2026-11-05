@@ -1,0 +1,12 @@
+*.FCBak
+*.FCStd.*
+*.pyc
+__pycache__/
+.idea/
+.vscode/
+*.gdoc
+*.gsheet
+*.gslides
+desktop.ini
+.tmp.drive*
+~$*
