@@ -558,7 +558,9 @@ def _section(ax, dim_v):
 
 
 def _iso_preview(doc, out_dir):
-    """Tessellate shapes and draw a simple isometric-ish matplotlib 3D preview."""
+    """3D preview of both bridges. All triangles go in one collection per view
+    so matplotlib depth-sorts across objects; big faces are subdivided so the
+    deck doesn't paint over the walls and rails."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -567,70 +569,68 @@ def _iso_preview(doc, out_dir):
     import numpy as np
 
     path = os.path.join(out_dir, "Bridge_Rails_iso.png")
-    fig = plt.figure(figsize=(12, 7), dpi=140)
-    ax = fig.add_subplot(111, projection="3d")
+    colour_map = [("RAIL", COL_RAIL), ("BRK", COL_STEEL), ("ANC", COL_ANCHOR),
+                  ("WALL", COL_WALL), ("DECK", COL_DECK)]
 
-    def add_shape(shape, colour, alpha=1.0):
-        try:
-            tris = shape.tessellate(5.0)  # (points, triangles)
-        except Exception:
-            return
-        pts = np.array([[p.x, p.y, p.z] for p in tris[0]])
-        if len(pts) == 0:
-            return
-        faces = []
-        for t in tris[1]:
-            faces.append(pts[list(t)])
-        if not faces:
-            return
-        coll = Poly3DCollection(faces, alpha=alpha)
-        coll.set_facecolor(colour)
-        coll.set_edgecolor((0.2, 0.2, 0.2, 0.15))
-        coll.set_linewidth(0.1)
+    def split(tri, max_edge=300.0):
+        a, b, c = tri
+        e = [np.linalg.norm(b - a), np.linalg.norm(c - b), np.linalg.norm(a - c)]
+        if max(e) <= max_edge:
+            return [tri]
+        ab, bc, ca = (a + b) / 2, (b + c) / 2, (c + a) / 2
+        out = []
+        for t in ((a, ab, ca), (ab, b, bc), (ca, bc, c), (ab, bc, ca)):
+            out += split(np.array(t), max_edge)
+        return out
+
+    def light(col, n):
+        k = 0.55 + 0.45 * abs(n[2]) + 0.15 * max(n[0], 0)
+        return tuple(min(1.0, ch * min(k, 1.15)) for ch in col)
+
+    fig = plt.figure(figsize=(16, 7), dpi=140)
+    for i, grp_name in enumerate(("Bridge_1", "Bridge_2")):
+        grp = doc.getObject(grp_name)
+        ax = fig.add_subplot(1, 2, i + 1, projection="3d")
+        faces, cols = [], []
+        xmin = ymin = 1e18
+        xmax = ymax = -1e18
+        for obj in grp.Group:
+            if not hasattr(obj, "Shape") or obj.Shape.isNull():
+                continue
+            col = COL_DECK
+            for key, c in colour_map:
+                if key in obj.Name:
+                    col = c
+                    break
+            bb = obj.Shape.BoundBox
+            xmin, xmax = min(xmin, bb.XMin), max(xmax, bb.XMax)
+            ymin, ymax = min(ymin, bb.YMin), max(ymax, bb.YMax)
+            pts, tris = obj.Shape.tessellate(2.0)
+            P = np.array([[p.x, p.y, p.z] for p in pts])
+            for t in tris:
+                tri = P[list(t)]
+                n = np.cross(tri[1] - tri[0], tri[2] - tri[0])
+                nn = np.linalg.norm(n)
+                n = n / nn if nn else n
+                c = light(col, n)
+                for st in split(tri):
+                    faces.append(st)
+                    cols.append(c)
+        coll = Poly3DCollection(faces, facecolors=cols, edgecolors=cols, linewidths=0.05)
         ax.add_collection3d(coll)
-
-    colour_map = {
-        "DECK": COL_DECK,
-        "WALL": COL_WALL,
-        "RAIL": COL_RAIL,
-        "BRK": COL_STEEL,
-        "ANC": COL_ANCHOR,
-    }
-    # Only Bridge 1 for a readable iso (Bridge 2 is similar); include both lightly
-    for obj in doc.Objects:
-        if not hasattr(obj, "Shape") or obj.Shape.isNull():
-            continue
-        name = obj.Name
-        col = COL_DECK
-        alpha = 1.0
-        for key, c in colour_map.items():
-            if key in name:
-                col = c
-                break
-        if "ANC" in name:
-            alpha = 0.7
-        if name.startswith("Bridge_2"):
-            # skip Bridge 2 in iso to keep one clear view; model still has both
-            continue
-        add_shape(obj.Shape, col, alpha)
-
-    # Bounds for Bridge 1
-    deck_l = _deck_length(B1_RAIL_L, B1_N_PER_SIDE)
-    ax.set_xlim(0, deck_l)
-    ax.set_ylim(-DECK_W / 2 - 200, DECK_W / 2 + 200)
-    ax.set_zlim(-DECK_T, WALL_H + 50)
-    try:
-        ax.set_box_aspect((deck_l, DECK_W + 400, WALL_H + DECK_T + 50))
-    except Exception:
-        pass
-    ax.view_init(elev=28, azim=-55)
-    ax.set_xlabel("along (mm)", fontsize=7)
-    ax.set_ylabel("across (mm)", fontsize=7)
-    ax.set_zlabel("up (mm)", fontsize=7)
-    ax.tick_params(labelsize=6)
-    ax.set_title("Bridge 1 — 3D model preview (rails + proposed brackets)", fontsize=11)
-    fig.text(0.5, 0.02, "Bridge 2 is in the same FCStd (group Bridge_2); same section, L=3600, 1 opening per side",
-             ha="center", fontsize=8, color="#444")
+        ax.set_xlim(xmin, xmax)
+        ax.set_ylim(ymin - 100, ymax + 100)
+        ax.set_zlim(-DECK_T, WALL_H + 50)
+        try:
+            ax.set_box_aspect((xmax - xmin, ymax - ymin + 200, WALL_H + DECK_T + 50))
+        except Exception:
+            pass
+        ax.view_init(elev=30, azim=-60)
+        ax.set_axis_off()
+        n_r = sum(1 for o in grp.Group if "RAIL" in o.Name)
+        rl = B1_RAIL_L if i == 0 else B2_RAIL_L
+        ax.set_title(f"{grp_name.replace('_', ' ')}: {n_r} rails x {rl:.0f} mm", fontsize=11)
+    fig.suptitle("Laguna Quays bridge timber rails: 3D model preview", fontsize=12)
     fig.tight_layout()
     fig.savefig(path, dpi=140)
     plt.close(fig)
